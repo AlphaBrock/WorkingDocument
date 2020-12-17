@@ -3,6 +3,35 @@
 1. Flink作为流式计算，其对于数据处理的核心在于`时间`，所以出问题80%可能是跟数据时间有关
 2. 使flink计算结果更接近于spl同于，建议配置任务时:时间(`Time Characteristic`)选择 Event Time
 
+## Flink Dashboard
+
+### 界面介绍
+
+Task Slots准确来说是线程数，即Fornaxee配置中的并行度，当并行度为1，则消耗一个Slot
+
+![](https://cdn.jsdelivr.net/gh/AlphaBrock/md_img/macos/20201217142848.png)
+
+![](https://cdn.jsdelivr.net/gh/AlphaBrock/md_img/macos/20201217144331.png)
+
+![](https://cdn.jsdelivr.net/gh/AlphaBrock/md_img/macos/20201217144458.png)
+
+### 监控指标
+
+在日常排障中主要依赖于该仪表盘的俩大项指标来确定排查方向:
+
+1. Watermark(水位线)
+2. Metrics(监控指标)
+
+#### Watermark(水位线)
+
+该值相对于正常时间，无论是提早了很多还是晚了很多，都会对统计结果造成很大影响
+
+#### Metrics(监控指标)
+
+Flink提供基础的监控指标，具体请看: [Metrics](https://ci.apache.org/projects/flink/flink-docs-release-1.12/ops/metrics.html)
+
+对于Aggregator算子来算，numLateRecordsDropped指标，如果其值在不断地快速上升，那么表明有大量的迟到数据，该值直接影响到了计算的准确性
+
 ## 故障分类
 
 ### 低级问题
@@ -74,6 +103,36 @@
    解决方案:
 
    - 在Evaluator算子中，对end字段值减去一个窗口时间
+   
+3. Max Out Of Orderness的值该如何填
+
+   该参数被用来解决乱序问题，即: watermark = max(eventTime1,eventTime2)-Max Out Of Orderness，来尽可能让数据进入到窗口，但是该值又不能特别大，因为在时效性和准确性上只能取舍，不能兼得
+
+   这也就产生了一个问题:
+
+   - 为了尽可能让Flink的值与SPL统计值近似，该参数的值该怎么填
+
+   解决方案:
+
+   由于同一个topic中混杂了其他类型数据，不可能会单单存储Flink计算需要的数据，这个时候就涉及到一些日志回写到kafka的时效性很高，一些很低，这也就影响了水位线
+
+   此时我们得先看下Flink计算需要的数据其采集到进入集群的延迟有多少，然后根据这个时间适当调整该参数
+
+   ```sql
+   index=yyrz appname:jzyypt tag: jzyypt_esb_service_records
+   |eval source_cost=(collector_recv_timestamp-timestamp)/1000
+   |eval recv_cost=(collector_recv_timestamp-agent_send_timestamp)/1000
+   |eval scan_cost=(agent_send_timestamp-timestamp)/1000
+   |bucket timestamp span=1m as ts
+   |stats pct(source_cost,95) as a, pct(recv_cost,95) as b, pct(scan_cost,95) as c by ts
+   |rename a.95 as "集群接收时间减去timestamp",b.95 as "集群接收时间减去agent发送时间",c.95 as "agent发送时间减去timestamp"
+   ```
+
+   - 集群接收时间减去timestamp = collector_recv_timestamp-timestamp
+   - 集群接收时间减去agent发送时间 = collector_recv_timestamp-agent_send_timestamp
+   - agent发送时间减去timestamp = agent_send_timestamp-timestamp
+
+   ![](https://cdn.jsdelivr.net/gh/AlphaBrock/md_img/macos/20201217153611.png)
 
 ### 高级问题
 
@@ -141,4 +200,5 @@
    - 检查Agent 发送带宽是不是受到了限制(Agent配置查看)
    - 在这期间是否是Agent缓存满了，即这个时间段日志激增，导致发送过程延迟
    - 检查Agent是否为性能不足
+   - 检查Agent所采集历史日志量是不是特别大，以及该主机是不是本身就是带宽繁忙
    - **其他可能性待补充。。。**
